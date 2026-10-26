@@ -1,0 +1,163 @@
+(() => {
+  const cfg = window.SMART_LEDGER_CONFIG || {};
+  const $ = id => document.getElementById(id);
+  const money = n => "RM " + Number(n || 0).toLocaleString("en-MY",{minimumFractionDigits:2,maximumFractionDigits:2});
+  const today = () => new Date().toLocaleDateString("en-CA");
+  const dateTime = () => new Date().toISOString();
+  let sb, currentUser, profile, categories = [], reportCache = [], recordsCache = [];
+  const setText = (id, text) => { $(id).textContent = text || ""; };
+  const show = (id, yes=true) => $(id).classList.toggle("hidden", !yes);
+  const err = e => (e && e.message) ? e.message : String(e || "Unknown error");
+  function initClient() {
+    if (!cfg.SUPABASE_URL || cfg.SUPABASE_URL.includes("PASTE_") || !cfg.SUPABASE_ANON_KEY || cfg.SUPABASE_ANON_KEY.includes("PASTE_")) {
+      show("setupNotice", true);
+      $("setupNotice").textContent = "Setup required: add your Supabase Project URL and publishable/anon key to config.js, then reload this page.";
+      return false;
+    }
+    sb = window.supabase.createClient(cfg.SUPABASE_URL, cfg.SUPABASE_ANON_KEY);
+    return true;
+  }
+  function loginEmail(id) { return id.trim().toLowerCase() + "@smartledger.local"; }
+  function localDate(iso) { return iso ? new Date(iso + "T12:00:00").toLocaleDateString("en-MY") : ""; }
+  async function loadProfile() {
+    const {data,error} = await sb.from("profiles").select("id, username, role, is_active").eq("id",currentUser.id).single();
+    if (error) throw error;
+    profile = data;
+    if (!profile.is_active) { await sb.auth.signOut(); throw new Error("This account has been disabled. Contact your administrator."); }
+    show("adminTab", profile.role === "admin");
+    show("actionsHeader", profile.role === "admin");
+  }
+  async function loadCategories() {
+    const {data,error} = await sb.from("categories").select("id,name,is_active").order("name");
+    if (error) throw error;
+    categories = data || [];
+    const active = categories.filter(c => c.is_active);
+    const options = '<option value="">All categories</option>' + active.map(c=>`<option value="${c.id}">${escapeHtml(c.name)}</option>`).join("");
+    $("recordsCategory").innerHTML = options;
+    $("reportCategory").innerHTML = options;
+    $("recordCategory").innerHTML = active.map(c=>`<option value="${c.id}">${escapeHtml(c.name)}</option>`).join("");
+    renderCategoryList();
+  }
+  function escapeHtml(v) { return String(v ?? "").replace(/[&<>"']/g, c=>({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;","'":"&#39;"}[c])); }
+  function setDefaultDates() {
+    ["dashFrom","dashTo","recordsFrom","recordsTo","reportFrom","reportTo","recordDate"].forEach(id => $(id).value = today());
+  }
+  function openTab(tab) {
+    document.querySelectorAll(".tab-panel").forEach(el=>el.classList.add("hidden"));
+    $(tab).classList.remove("hidden");
+    document.querySelectorAll(".tabs button[data-tab]").forEach(b=>b.classList.toggle("active",b.dataset.tab===tab));
+    if(tab==="dashboard") loadDashboard();
+    if(tab==="records") loadRecords();
+    if(tab==="reports") generateReport();
+  }
+  async function getRecords(from,to,categoryId) {
+    let q = sb.from("records").select("id,category_id,code,amount,discount,record_date,created_at,created_by,profiles(username),categories(name)").gte("record_date",from).lte("record_date",to).order("record_date",{ascending:false}).order("created_at",{ascending:false});
+    if(categoryId) q=q.eq("category_id",categoryId);
+    const {data,error}=await q;
+    if(error) throw error;
+    return data || [];
+  }
+  function totals(rows) {
+    return rows.reduce((a,r)=>{a.amount+=Number(r.amount||0);a.discount+=Number(r.discount||0);a.count++;return a;},{amount:0,discount:0,count:0});
+  }
+  async function loadDashboard() {
+    try {
+      const rows=await getRecords($("dashFrom").value||today(),$("dashTo").value||today());
+      const by={}; rows.forEach(r=>{const k=r.category_id;by[k] ||= {name:r.categories?.name||"Unknown",amount:0,discount:0,count:0};by[k].amount+=Number(r.amount||0);by[k].discount+=Number(r.discount||0);by[k].count++;});
+      const allCats=categories;
+      $("dashboardRows").innerHTML=allCats.map(c=>{const x=by[c.id]||{amount:0,discount:0,count:0};return `<tr><td>${escapeHtml(c.name)}${c.is_active?"":' <span class="pill off">Inactive</span>'}</td><td>${money(x.amount)}</td><td>${money(x.discount)}</td><td>${x.count}</td></tr>`}).join("");
+      const t=totals(rows);
+      $("dashboardFoot").innerHTML=`<tr><td>Grand Total</td><td>${money(t.amount)}</td><td>${money(t.discount)}</td><td>${t.count}</td></tr>`;
+      $("summaryCards").innerHTML=`<div class="card"><div class="label">Total Amount</div><div class="value">${money(t.amount)}</div></div><div class="card"><div class="label">Total Discount</div><div class="value">${money(t.discount)}</div></div><div class="card"><div class="label">Total Records</div><div class="value">${t.count}</div></div>`;
+    } catch(e) { alert("Could not load dashboard: "+err(e)); }
+  }
+  async function saveRecord(e) {
+    e.preventDefault(); setText("recordMessage","");
+    const amount=$("recordAmount").value, discount=$("recordDiscount").value;
+    const payload={category_id:$("recordCategory").value,code:$("recordCode").value.trim()||null,amount:amount===""?null:Number(amount),discount:discount===""?null:Number(discount),record_date:$("recordDate").value,created_by:currentUser.id};
+    const {error}=await sb.from("records").insert(payload);
+    if(error){setText("recordMessage","Save failed: "+err(error));return;}
+    $("recordForm").reset(); $("recordDate").value=today(); setText("recordMessage","Saved successfully.");
+    await loadDashboard();
+  }
+  async function loadRecords() {
+    try {
+      let rows=await getRecords($("recordsFrom").value||"2000-01-01",$("recordsTo").value||"2999-12-31",$("recordsCategory").value||null);
+      const search=$("recordsSearch").value.trim().toLowerCase();
+      if(search) rows=rows.filter(r=>(r.code||"").toLowerCase().includes(search));
+      recordsCache=rows;
+      $("recordsRows").innerHTML=rows.map(r=>`<tr><td>${localDate(r.record_date)}</td><td>${escapeHtml(r.categories?.name||"")}</td><td>${escapeHtml(r.code||"-")}</td><td>${r.amount==null?"-":money(r.amount)}</td><td>${r.discount==null?"-":money(r.discount)}</td><td>${escapeHtml(r.profiles?.username||"")}</td>${profile.role==="admin"?`<td><button class="secondary" data-delete="${r.id}">Delete</button></td>`:""}</tr>`).join("");
+      setText("recordsMessage",`${rows.length} record(s)`);
+      $("recordsRows").querySelectorAll("[data-delete]").forEach(b=>b.addEventListener("click",()=>deleteRecord(b.dataset.delete)));
+    } catch(e) { setText("recordsMessage","Could not load records: "+err(e)); }
+  }
+  async function deleteRecord(id) {
+    if(!confirm("Delete this record permanently?")) return;
+    const {error}=await sb.from("records").delete().eq("id",id);
+    if(error){alert("Delete failed: "+err(error));return;}
+    await loadRecords(); await loadDashboard();
+  }
+  async function generateReport() {
+    try {
+      reportCache=await getRecords($("reportFrom").value||today(),$("reportTo").value||today(),$("reportCategory").value||null);
+      const t=totals(reportCache);
+      const group={}; reportCache.forEach(r=>{const n=r.categories?.name||"Unknown";group[n] ||= {amount:0,discount:0,count:0};group[n].amount+=Number(r.amount||0);group[n].discount+=Number(r.discount||0);group[n].count++;});
+      setText("reportTotals",`Records: ${t.count} · Total Amount: ${money(t.amount)} · Total Discount: ${money(t.discount)}`);
+      $("reportRows").innerHTML=reportCache.map(r=>`<tr><td>${localDate(r.record_date)}</td><td>${new Date(r.created_at).toLocaleTimeString("en-MY",{hour:"2-digit",minute:"2-digit"})}</td><td>${escapeHtml(r.categories?.name||"")}</td><td>${escapeHtml(r.code||"-")}</td><td>${r.amount==null?"":money(r.amount)}</td><td>${r.discount==null?"":money(r.discount)}</td><td>${escapeHtml(r.profiles?.username||"")}</td></tr>`).join("");
+      const categoryFoot=Object.entries(group).map(([name,x])=>`<tr><td colspan="3">${escapeHtml(name)} subtotal</td><td></td><td>${money(x.amount)}</td><td>${money(x.discount)}</td><td>${x.count} records</td></tr>`).join("");
+      $("reportFoot").innerHTML=categoryFoot+`<tr><td colspan="4">GRAND TOTAL</td><td>${money(t.amount)}</td><td>${money(t.discount)}</td><td>${t.count} records</td></tr>`;
+    } catch(e) { setText("reportTotals","Could not generate report: "+err(e)); }
+  }
+  function exportCsv() {
+    const rows=reportCache; const head=["Date","Time","Category","Code","Amount (RM)","Discount (RM)","Created By"];
+    const data=[head,...rows.map(r=>[r.record_date,new Date(r.created_at).toLocaleTimeString("en-MY",{hour:"2-digit",minute:"2-digit"}),r.categories?.name||"",r.code||"",r.amount??"",r.discount??"",r.profiles?.username||""])];
+    const t=totals(rows);
+    const group={}; rows.forEach(r=>{const n=r.categories?.name||"Unknown";group[n] ||= {amount:0,discount:0,count:0};group[n].amount+=Number(r.amount||0);group[n].discount+=Number(r.discount||0);group[n].count++;});
+    data.push([]);
+    Object.entries(group).forEach(([name,x])=>data.push([name+" subtotal","","","",x.amount.toFixed(2),x.discount.toFixed(2),x.count+" records"]));
+    data.push(["GRAND TOTAL","","","",t.amount.toFixed(2),t.discount.toFixed(2),t.count+" records"]);
+    const csv="\uFEFF"+data.map(row=>row.map(v=>`"${String(v??"").replace(/"/g,'""')}"`).join(",")).join("\r\n");
+    const blob=new Blob([csv],{type:"text/csv;charset=utf-8;"}); const url=URL.createObjectURL(blob); const a=document.createElement("a");a.href=url;a.download=`smart-ledger-${$("reportFrom").value}-to-${$("reportTo").value}.csv`;a.click();URL.revokeObjectURL(url);
+  }
+  async function createCategory(e) {
+    e.preventDefault(); setText("categoryMessage","");
+    const name=$("categoryName").value.trim(); if(!name)return;
+    const {error}=await sb.from("categories").insert({name,created_by:currentUser.id});
+    if(error){setText("categoryMessage","Failed: "+err(error));return;}
+    $("categoryName").value="";setText("categoryMessage","Category created.");await loadCategories();await loadDashboard();
+  }
+  function renderCategoryList() {
+    $("categoryList").innerHTML=categories.map(c=>`<div class="category-item"><span>${escapeHtml(c.name)} ${c.is_active?'<span class="pill">Active</span>':'<span class="pill off">Inactive</span>'}</span><button class="secondary" data-toggle="${c.id}" data-active="${c.is_active}">${c.is_active?"Deactivate":"Activate"}</button></div>`).join("");
+    $("categoryList").querySelectorAll("[data-toggle]").forEach(b=>b.addEventListener("click",async()=>{const {error}=await sb.from("categories").update({is_active:b.dataset.active!=="true"}).eq("id",b.dataset.toggle);if(error){alert(err(error));return;}await loadCategories();await loadDashboard();}));
+  }
+  async function createUser(e) {
+    e.preventDefault(); setText("userMessage","Creating user…");
+    const username=$("newUserId").value.trim().toLowerCase(), password=$("newUserPassword").value;
+    try {
+      const {data:{session}}=await sb.auth.getSession();
+      const res=await fetch(cfg.SUPABASE_URL+"/functions/v1/create-user",{method:"POST",headers:{"Content-Type":"application/json","Authorization":"Bearer "+session.access_token,"apikey":cfg.SUPABASE_ANON_KEY},body:JSON.stringify({username,password})});
+      const body=await res.json();
+      if(!res.ok) throw new Error(body.error||"Could not create user");
+      $("userForm").reset();setText("userMessage","User created successfully.");
+    } catch(e){setText("userMessage","Failed: "+err(e));}
+  }
+  async function afterLogin() {
+    try {
+      await loadProfile(); await loadCategories(); setDefaultDates();
+      show("loginView",false);show("mainView",true);show("logoutBtn",true);
+      openTab("dashboard");
+    } catch(e) { setText("loginError",err(e)); await sb.auth.signOut(); }
+  }
+  async function start() {
+    if(!initClient()) return;
+    $("loginForm").addEventListener("submit",async e=>{e.preventDefault();setText("loginError","");const id=$("loginId").value.trim();const {data,error}=await sb.auth.signInWithPassword({email:loginEmail(id),password:$("loginPassword").value});if(error){setText("loginError","Login failed. Check your ID and password.");return;}currentUser=data.user;await afterLogin();});
+    $("logoutBtn").addEventListener("click",async()=>{await sb.auth.signOut();location.reload();});
+    document.querySelectorAll("[data-tab]").forEach(b=>b.addEventListener("click",()=>openTab(b.dataset.tab)));
+    $("recordForm").addEventListener("submit",saveRecord);$("dashApply").addEventListener("click",loadDashboard);
+    $("dashToday").addEventListener("click",()=>{$("dashFrom").value=today();$("dashTo").value=today();loadDashboard();});
+    $("recordsApply").addEventListener("click",loadRecords);$("generateReport").addEventListener("click",generateReport);$("exportCsv").addEventListener("click",exportCsv);
+    $("categoryForm").addEventListener("submit",createCategory);$("userForm").addEventListener("submit",createUser);
+    const {data:{session}}=await sb.auth.getSession();if(session){currentUser=session.user;await afterLogin();}
+  }
+  document.addEventListener("DOMContentLoaded",start);
+})();
