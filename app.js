@@ -20,12 +20,13 @@
   function loginEmail(id) { return id.trim().toLowerCase() + "@smartledger.local"; }
   function localDate(iso) { return iso ? new Date(iso + "T12:00:00").toLocaleDateString("en-MY") : ""; }
   async function loadProfile() {
-    const {data,error} = await sb.from("profiles").select("id, username, role, is_active").eq("id",currentUser.id).single();
+    const {data,error} = await sb.from("profiles").select("id, username, display_name, role, is_active").eq("id",currentUser.id).single();
     if (error) throw error;
     profile = data;
     if (!profile.is_active) { await sb.auth.signOut(); throw new Error("This account has been disabled. Contact your administrator."); }
     show("adminTab", profile.role === "admin");
     show("actionsHeader", profile.role === "admin");
+    if (profile.role === "admin") await loadUserList();
   }
   async function loadCategories() {
     const {data,error} = await sb.from("categories").select("id,name,is_active").order("name");
@@ -51,7 +52,7 @@
     if(tab==="reports") generateReport();
   }
   async function getRecords(from,to,categoryId) {
-    let q = sb.from("records").select("id,category_id,code,amount,discount,record_date,created_at,created_by,profiles(username),categories(name)").gte("record_date",from).lte("record_date",to).order("record_date",{ascending:false}).order("created_at",{ascending:false});
+    let q = sb.from("records").select("id,category_id,code,amount,discount,record_date,created_at,created_by,profiles(username,display_name),categories(name)").gte("record_date",from).lte("record_date",to).order("record_date",{ascending:false}).order("created_at",{ascending:false});
     if(categoryId) q=q.eq("category_id",categoryId);
     const {data,error}=await q;
     if(error) throw error;
@@ -86,7 +87,7 @@
       const search=$("recordsSearch").value.trim().toLowerCase();
       if(search) rows=rows.filter(r=>(r.code||"").toLowerCase().includes(search));
       recordsCache=rows;
-      $("recordsRows").innerHTML=rows.map(r=>`<tr><td>${localDate(r.record_date)}</td><td>${escapeHtml(r.categories?.name||"")}</td><td>${escapeHtml(r.code||"-")}</td><td>${r.amount==null?"-":money(r.amount)}</td><td>${r.discount==null?"-":money(r.discount)}</td><td>${escapeHtml(r.profiles?.username||"")}</td>${profile.role==="admin"?`<td><button class="secondary" data-delete="${r.id}">Delete</button></td>`:""}</tr>`).join("");
+      $("recordsRows").innerHTML=rows.map(r=>`<tr><td>${localDate(r.record_date)}</td><td>${escapeHtml(r.categories?.name||"")}</td><td>${escapeHtml(r.code||"-")}</td><td>${r.amount==null?"-":money(r.amount)}</td><td>${r.discount==null?"-":money(r.discount)}</td><td>${escapeHtml(r.profiles?.display_name||r.profiles?.username||"")}</td>${profile.role==="admin"?`<td><button class="secondary" data-delete="${r.id}">Delete</button></td>`:""}</tr>`).join("");
       setText("recordsMessage",`${rows.length} record(s)`);
       $("recordsRows").querySelectorAll("[data-delete]").forEach(b=>b.addEventListener("click",()=>deleteRecord(b.dataset.delete)));
     } catch(e) { setText("recordsMessage","Could not load records: "+err(e)); }
@@ -103,14 +104,14 @@
       const t=totals(reportCache);
       const group={}; reportCache.forEach(r=>{const n=r.categories?.name||"Unknown";group[n] ||= {amount:0,discount:0,count:0};group[n].amount+=Number(r.amount||0);group[n].discount+=Number(r.discount||0);group[n].count++;});
       setText("reportTotals",`Records: ${t.count} · Total Amount: ${money(t.amount)} · Total Discount: ${money(t.discount)}`);
-      $("reportRows").innerHTML=reportCache.map(r=>`<tr><td>${localDate(r.record_date)}</td><td>${new Date(r.created_at).toLocaleTimeString("en-MY",{hour:"2-digit",minute:"2-digit"})}</td><td>${escapeHtml(r.categories?.name||"")}</td><td>${escapeHtml(r.code||"-")}</td><td>${r.amount==null?"":money(r.amount)}</td><td>${r.discount==null?"":money(r.discount)}</td><td>${escapeHtml(r.profiles?.username||"")}</td></tr>`).join("");
+      $("reportRows").innerHTML=reportCache.map(r=>`<tr><td>${localDate(r.record_date)}</td><td>${new Date(r.created_at).toLocaleTimeString("en-MY",{hour:"2-digit",minute:"2-digit"})}</td><td>${escapeHtml(r.categories?.name||"")}</td><td>${escapeHtml(r.code||"-")}</td><td>${r.amount==null?"":money(r.amount)}</td><td>${r.discount==null?"":money(r.discount)}</td><td>${escapeHtml(r.profiles?.display_name||r.profiles?.username||"")}</td></tr>`).join("");
       const categoryFoot=Object.entries(group).map(([name,x])=>`<tr><td colspan="3">${escapeHtml(name)} subtotal</td><td></td><td>${money(x.amount)}</td><td>${money(x.discount)}</td><td>${x.count} records</td></tr>`).join("");
       $("reportFoot").innerHTML=categoryFoot+`<tr><td colspan="4">GRAND TOTAL</td><td>${money(t.amount)}</td><td>${money(t.discount)}</td><td>${t.count} records</td></tr>`;
     } catch(e) { setText("reportTotals","Could not generate report: "+err(e)); }
   }
   function exportCsv() {
     const rows=reportCache; const head=["Date","Time","Category","Code","Amount (RM)","Discount (RM)","Created By"];
-    const data=[head,...rows.map(r=>[r.record_date,new Date(r.created_at).toLocaleTimeString("en-MY",{hour:"2-digit",minute:"2-digit"}),r.categories?.name||"",r.code||"",r.amount??"",r.discount??"",r.profiles?.username||""])];
+    const data=[head,...rows.map(r=>[r.record_date,new Date(r.created_at).toLocaleTimeString("en-MY",{hour:"2-digit",minute:"2-digit"}),r.categories?.name||"",r.code||"",r.amount??"",r.discount??"",r.profiles?.display_name||r.profiles?.username||""])];
     const t=totals(rows);
     const group={}; rows.forEach(r=>{const n=r.categories?.name||"Unknown";group[n] ||= {amount:0,discount:0,count:0};group[n].amount+=Number(r.amount||0);group[n].discount+=Number(r.discount||0);group[n].count++;});
     data.push([]);
@@ -127,15 +128,46 @@
     $("categoryName").value="";setText("categoryMessage","Category created.");await loadCategories();await loadDashboard();
   }
   function renderCategoryList() {
-    $("categoryList").innerHTML=categories.map(c=>`<div class="category-item"><span>${escapeHtml(c.name)} ${c.is_active?'<span class="pill">Active</span>':'<span class="pill off">Inactive</span>'}</span><button class="secondary" data-toggle="${c.id}" data-active="${c.is_active}">${c.is_active?"Deactivate":"Activate"}</button></div>`).join("");
+    $("categoryList").innerHTML=categories.map(c=>`<div class="category-item"><span>${escapeHtml(c.name)} ${c.is_active?'<span class="pill">Active</span>':'<span class="pill off">Inactive</span>'}</span><div class="category-actions"><button class="secondary" data-toggle="${c.id}" data-active="${c.is_active}">${c.is_active?"Deactivate":"Activate"}</button><button class="danger" data-cat-delete="${c.id}" data-cat-name="${escapeHtml(c.name)}">Delete</button></div></div>`).join("");
     $("categoryList").querySelectorAll("[data-toggle]").forEach(b=>b.addEventListener("click",async()=>{const {error}=await sb.from("categories").update({is_active:b.dataset.active!=="true"}).eq("id",b.dataset.toggle);if(error){alert(err(error));return;}await loadCategories();await loadDashboard();}));
+    $("categoryList").querySelectorAll("[data-cat-delete]").forEach(b=>b.addEventListener("click",async()=>{if(!confirm(`Permanently delete category “${b.dataset.catName}”? Categories with existing records cannot be deleted.`))return;const {count,error:checkError}=await sb.from("records").select("id",{count:"exact",head:true}).eq("category_id",b.dataset.catDelete);if(checkError){alert("Could not check category usage: "+err(checkError));return;}if(count>0){alert("This category has existing records and cannot be deleted. You can deactivate it instead.");return;}const {error}=await sb.from("categories").delete().eq("id",b.dataset.catDelete);if(error){alert("Delete failed: "+err(error));return;}await loadCategories();await loadDashboard();}));
+  }
+  async function loadUserList() {
+    const {data,error}=await sb.from("profiles").select("id,username,display_name,role,is_active,created_at").order("created_at",{ascending:true});
+    if(error){setText("manageUserMessage","Could not load users: "+err(error));return;}
+    const users=data||[];
+    setText("userCount",`Total users: ${users.length} · Active: ${users.filter(u=>u.is_active).length}`);
+    $("userList").innerHTML=users.map(u=>`<div class="user-item user-management-item"><div class="user-meta"><strong>${escapeHtml(u.display_name||u.username)}</strong><div class="muted small">Login ID: ${escapeHtml(u.username)} · ${u.role==="admin"?"Admin":"User"} · ${u.is_active?"Active":"Inactive"}</div><div class="muted small">Created: ${u.created_at?new Date(u.created_at).toLocaleDateString("en-MY"):"—"}</div></div><input aria-label="Display name for ${escapeHtml(u.username)}" data-display-name="${u.id}" value="${escapeHtml(u.display_name||u.username)}" maxlength="80"><div class="user-actions"><button class="secondary" data-display-save="${u.id}">Save name</button>${u.id!==currentUser.id?`<button class="danger" data-user-delete="${u.id}" data-user-name="${escapeHtml(u.display_name||u.username)}" data-user-id="${escapeHtml(u.username)}">Delete user</button>`:`<span class="pill">Current account</span>`}</div></div>`).join("");
+    $("userList").querySelectorAll("[data-display-save]").forEach(b=>b.addEventListener("click",()=>saveDisplayName(b.dataset.displaySave)));
+    $("userList").querySelectorAll("[data-user-delete]").forEach(b=>b.addEventListener("click",()=>deleteUser(b.dataset.userDelete,b.dataset.userName,b.dataset.userId)));
+  }
+  async function callAdminFunction(name, payload) {
+    const {data:{session}}=await sb.auth.getSession();
+    if(!session) throw new Error("Your session has expired. Please log in again.");
+    const res=await fetch(cfg.SUPABASE_URL+"/functions/v1/"+name,{method:"POST",headers:{"Content-Type":"application/json","Authorization":"Bearer "+session.access_token,"apikey":cfg.SUPABASE_ANON_KEY},body:JSON.stringify(payload)});
+    let body={}; try { body=await res.json(); } catch {}
+    if(!res.ok) throw new Error(body.error||`Request failed (${res.status})`);
+    return body;
+  }
+  async function saveDisplayName(userId) {
+    const input=$("userList").querySelector(`[data-display-name="${userId}"]`); const displayName=input.value.trim();
+    if(!displayName){setText("manageUserMessage","Display name cannot be blank.");return;}
+    setText("manageUserMessage","Saving display name…");
+    try { await callAdminFunction("update-user-display-name",{userId,displayName}); setText("manageUserMessage","Display name updated. Login ID and password are unchanged."); await loadUserList(); if(userId===currentUser.id){await loadProfile();} }
+    catch(e){setText("manageUserMessage","Failed: "+err(e));}
+  }
+  async function deleteUser(userId, displayName, username) {
+    if(!confirm(`Delete user “${displayName}” (login ID: ${username})? This cannot be undone. Users with historical records cannot be deleted.`)) return;
+    setText("manageUserMessage","Deleting user…");
+    try { await callAdminFunction("delete-user",{userId}); setText("manageUserMessage",`User “${displayName}” deleted.`); await loadUserList(); }
+    catch(e){setText("manageUserMessage","Failed: "+err(e));}
   }
   async function createUser(e) {
     e.preventDefault(); setText("userMessage","Creating user…");
-    const username=$("newUserId").value.trim().toLowerCase(), password=$("newUserPassword").value;
+    const username=$("newUserId").value.trim().toLowerCase(), displayName=$("newUserDisplayName").value.trim(), password=$("newUserPassword").value;
     try {
       const {data:{session}}=await sb.auth.getSession();
-      const res=await fetch(cfg.SUPABASE_URL+"/functions/v1/create-user",{method:"POST",headers:{"Content-Type":"application/json","Authorization":"Bearer "+session.access_token,"apikey":cfg.SUPABASE_ANON_KEY},body:JSON.stringify({username,password})});
+      const res=await fetch(cfg.SUPABASE_URL+"/functions/v1/create-user",{method:"POST",headers:{"Content-Type":"application/json","Authorization":"Bearer "+session.access_token,"apikey":cfg.SUPABASE_ANON_KEY},body:JSON.stringify({username,displayName,password})});
       const body=await res.json();
       if(!res.ok) throw new Error(body.error||"Could not create user");
       $("userForm").reset();setText("userMessage","User created successfully.");
@@ -157,6 +189,9 @@
     $("dashToday").addEventListener("click",()=>{$("dashFrom").value=today();$("dashTo").value=today();loadDashboard();});
     $("recordsApply").addEventListener("click",loadRecords);$("generateReport").addEventListener("click",generateReport);$("exportCsv").addEventListener("click",exportCsv);
     $("categoryForm").addEventListener("submit",createCategory);$("userForm").addEventListener("submit",createUser);
+    const applyTheme = dark => { document.body.classList.toggle("dark",dark); $("themeToggle").textContent=dark?"☀️ Light mode":"🌙 Dark mode"; localStorage.setItem("smart-ledger-theme",dark?"dark":"light"); };
+    applyTheme(localStorage.getItem("smart-ledger-theme")==="dark");
+    $("themeToggle").addEventListener("click",()=>applyTheme(!document.body.classList.contains("dark")));
     const {data:{session}}=await sb.auth.getSession();if(session){currentUser=session.user;await afterLogin();}
   }
   document.addEventListener("DOMContentLoaded",start);
