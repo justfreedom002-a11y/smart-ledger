@@ -4,7 +4,7 @@
   const money = n => "RM " + Number(n || 0).toLocaleString("en-MY",{minimumFractionDigits:2,maximumFractionDigits:2});
   const today = () => new Date().toLocaleDateString("en-CA");
   const dateTime = () => new Date().toISOString();
-  let sb, currentUser, profile, categories = [], reportCache = [], recordsCache = [];
+  let sb, currentUser, profile, categories = [], users = [], reportCache = [], recordsCache = [];
   const setText = (id, text) => { $(id).textContent = text || ""; };
   const show = (id, yes=true) => $(id).classList.toggle("hidden", !yes);
   const err = e => (e && e.message) ? e.message : String(e || "Unknown error");
@@ -26,7 +26,30 @@
     if (!profile.is_active) { await sb.auth.signOut(); throw new Error("This account has been disabled. Contact your administrator."); }
     show("adminTab", profile.role === "admin");
     show("actionsHeader", profile.role === "admin");
-    if (profile.role === "admin") await loadUserList();
+    if (profile.role === "admin") { await loadUserList(); setupUserFilters(); } else { setupUserFilters(); }
+  }
+  function setupUserFilters() {
+    const filterIds = ["dashUser", "recordsUser", "reportUser"];
+    filterIds.forEach(id => {
+      const el = $(id);
+      if (!el) return;
+      if (profile.role !== "admin") {
+        el.innerHTML = `<option value="${currentUser.id}">My records</option>`;
+        el.value = currentUser.id;
+        el.closest("label")?.classList.add("hidden");
+        return;
+      }
+      el.closest("label")?.classList.remove("hidden");
+      const currentLabel = profile.display_name || profile.username || "My records";
+      el.innerHTML = `<option value="${currentUser.id}">My records (${escapeHtml(currentLabel)})</option><option value="all">All Users</option>` +
+        users.filter(u => u.id !== currentUser.id).map(u => `<option value="${u.id}">${escapeHtml(u.display_name || u.username)} (${escapeHtml(u.username)})</option>`).join("");
+      el.value = currentUser.id;
+    });
+  }
+  function selectedUserId(elementId) {
+    if (profile.role !== "admin") return currentUser.id;
+    const value = $(elementId)?.value || currentUser.id;
+    return value === "all" ? null : value;
   }
   async function loadCategories() {
     const {data,error} = await sb.from("categories").select("id,name,is_active").order("name");
@@ -51,9 +74,12 @@
     if(tab==="records") loadRecords();
     if(tab==="reports") generateReport();
   }
-  async function getRecords(from,to,categoryId) {
+  async function getRecords(from,to,categoryId,userId) {
     let q = sb.from("records").select("id,category_id,code,amount,discount,record_date,created_at,created_by,profiles(username,display_name),categories(name)").gte("record_date",from).lte("record_date",to).order("record_date",{ascending:false}).order("created_at",{ascending:false});
     if(categoryId) q=q.eq("category_id",categoryId);
+    // RLS protects the database; this filter controls the admin UI selection.
+    if (profile.role !== "admin") q=q.eq("created_by",currentUser.id);
+    else if (userId) q=q.eq("created_by",userId);
     const {data,error}=await q;
     if(error) throw error;
     return data || [];
@@ -63,7 +89,7 @@
   }
   async function loadDashboard() {
     try {
-      const rows=await getRecords($("dashFrom").value||today(),$("dashTo").value||today());
+      const rows=await getRecords($("dashFrom").value||today(),$("dashTo").value||today(),null,selectedUserId("dashUser"));
       const by={}; rows.forEach(r=>{const k=r.category_id;by[k] ||= {name:r.categories?.name||"Unknown",amount:0,discount:0,count:0};by[k].amount+=Number(r.amount||0);by[k].discount+=Number(r.discount||0);by[k].count++;});
       const allCats=categories;
       $("dashboardRows").innerHTML=allCats.map(c=>{const x=by[c.id]||{amount:0,discount:0,count:0};return `<tr><td>${escapeHtml(c.name)}${c.is_active?"":' <span class="pill off">Inactive</span>'}</td><td>${money(x.amount)}</td><td>${money(x.discount)}</td><td>${x.count}</td></tr>`}).join("");
@@ -83,7 +109,7 @@
   }
   async function loadRecords() {
     try {
-      let rows=await getRecords($("recordsFrom").value||"2000-01-01",$("recordsTo").value||"2999-12-31",$("recordsCategory").value||null);
+      let rows=await getRecords($("recordsFrom").value||"2000-01-01",$("recordsTo").value||"2999-12-31",$("recordsCategory").value||null,selectedUserId("recordsUser"));
       const search=$("recordsSearch").value.trim().toLowerCase();
       if(search) rows=rows.filter(r=>(r.code||"").toLowerCase().includes(search));
       recordsCache=rows;
@@ -100,7 +126,7 @@
   }
   async function generateReport() {
     try {
-      reportCache=await getRecords($("reportFrom").value||today(),$("reportTo").value||today(),$("reportCategory").value||null);
+      reportCache=await getRecords($("reportFrom").value||today(),$("reportTo").value||today(),$("reportCategory").value||null,selectedUserId("reportUser"));
       const t=totals(reportCache);
       const group={}; reportCache.forEach(r=>{const n=r.categories?.name||"Unknown";group[n] ||= {amount:0,discount:0,count:0};group[n].amount+=Number(r.amount||0);group[n].discount+=Number(r.discount||0);group[n].count++;});
       setText("reportTotals",`Records: ${t.count} · Total Amount: ${money(t.amount)} · Total Discount: ${money(t.discount)}`);
@@ -135,9 +161,11 @@
   async function loadUserList() {
     const {data,error}=await sb.from("profiles").select("id,username,display_name,role,is_active,created_at").order("created_at",{ascending:true});
     if(error){setText("manageUserMessage","Could not load users: "+err(error));return;}
-    const users=data||[];
+    users = data || [];
+    const userRows = users;
+    setupUserFilters();
     setText("userCount",`Total users: ${users.length} · Active: ${users.filter(u=>u.is_active).length}`);
-    $("userList").innerHTML=users.map(u=>`<div class="user-item user-management-item"><div class="user-meta"><strong>${escapeHtml(u.display_name||u.username)}</strong><div class="muted small">Login ID: ${escapeHtml(u.username)} · ${u.role==="admin"?"Admin":"User"} · ${u.is_active?"Active":"Inactive"}</div><div class="muted small">Created: ${u.created_at?new Date(u.created_at).toLocaleDateString("en-MY"):"—"}</div></div><input aria-label="Display name for ${escapeHtml(u.username)}" data-display-name="${u.id}" value="${escapeHtml(u.display_name||u.username)}" maxlength="80"><div class="user-actions"><button class="secondary" data-display-save="${u.id}">Save name</button>${u.id!==currentUser.id?`<button class="danger" data-user-delete="${u.id}" data-user-name="${escapeHtml(u.display_name||u.username)}" data-user-id="${escapeHtml(u.username)}">Delete user</button>`:`<span class="pill">Current account</span>`}</div></div>`).join("");
+    $("userList").innerHTML=userRows.map(u=>`<div class="user-item user-management-item"><div class="user-meta"><strong>${escapeHtml(u.display_name||u.username)}</strong><div class="muted small">Login ID: ${escapeHtml(u.username)} · ${u.role==="admin"?"Admin":"User"} · ${u.is_active?"Active":"Inactive"}</div><div class="muted small">Created: ${u.created_at?new Date(u.created_at).toLocaleDateString("en-MY"):"—"}</div></div><input aria-label="Display name for ${escapeHtml(u.username)}" data-display-name="${u.id}" value="${escapeHtml(u.display_name||u.username)}" maxlength="80"><div class="user-actions"><button class="secondary" data-display-save="${u.id}">Save name</button>${u.id!==currentUser.id?`<button class="danger" data-user-delete="${u.id}" data-user-name="${escapeHtml(u.display_name||u.username)}" data-user-id="${escapeHtml(u.username)}">Delete user</button>`:`<span class="pill">Current account</span>`}</div></div>`).join("");
     $("userList").querySelectorAll("[data-display-save]").forEach(b=>b.addEventListener("click",()=>saveDisplayName(b.dataset.displaySave)));
     $("userList").querySelectorAll("[data-user-delete]").forEach(b=>b.addEventListener("click",()=>deleteUser(b.dataset.userDelete,b.dataset.userName,b.dataset.userId)));
   }
@@ -188,6 +216,9 @@
     $("recordForm").addEventListener("submit",saveRecord);$("dashApply").addEventListener("click",loadDashboard);
     $("dashToday").addEventListener("click",()=>{$("dashFrom").value=today();$("dashTo").value=today();loadDashboard();});
     $("recordsApply").addEventListener("click",loadRecords);$("generateReport").addEventListener("click",generateReport);$("exportCsv").addEventListener("click",exportCsv);
+    ["dashUser"].forEach(id=>$(id).addEventListener("change",loadDashboard));
+    ["recordsUser"].forEach(id=>$(id).addEventListener("change",loadRecords));
+    ["reportUser"].forEach(id=>$(id).addEventListener("change",generateReport));
     $("categoryForm").addEventListener("submit",createCategory);$("userForm").addEventListener("submit",createUser);
     const applyTheme = dark => { document.body.classList.toggle("dark",dark); $("themeToggle").textContent=dark?"☀️ Light mode":"🌙 Dark mode"; localStorage.setItem("smart-ledger-theme",dark?"dark":"light"); };
     applyTheme(localStorage.getItem("smart-ledger-theme")==="dark");
