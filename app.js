@@ -75,7 +75,7 @@
     if(tab==="reports") generateReport();
   }
   async function getRecords(from,to,categoryId,userId) {
-    let q = sb.from("records").select("id,category_id,code,amount,discount,record_date,created_at,created_by,is_void,voided_by,voided_at,profiles(username,display_name),categories(name)").gte("record_date",from).lte("record_date",to).order("record_date",{ascending:false}).order("created_at",{ascending:false});
+    let q = sb.from("records").select("id,category_id,code,amount,discount,record_date,created_at,created_by,is_void,voided_by,voided_at,profiles!records_created_by_fkey(username,display_name),categories(name)").gte("record_date",from).lte("record_date",to).order("record_date",{ascending:false}).order("created_at",{ascending:false});
     if(categoryId) q=q.eq("category_id",categoryId);
     // RLS protects the database; this filter controls the admin UI selection.
     if (profile.role !== "admin") q=q.eq("created_by",currentUser.id);
