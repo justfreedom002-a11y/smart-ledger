@@ -25,7 +25,7 @@
     profile = data;
     if (!profile.is_active) { await sb.auth.signOut(); throw new Error("This account has been disabled. Contact your administrator."); }
     show("adminTab", profile.role === "admin");
-    show("actionsHeader", profile.role === "admin");
+    show("actionsHeader", true);
     if (profile.role === "admin") { await loadUserList(); setupUserFilters(); } else { setupUserFilters(); }
   }
   function setupUserFilters() {
@@ -75,7 +75,7 @@
     if(tab==="reports") generateReport();
   }
   async function getRecords(from,to,categoryId,userId) {
-    let q = sb.from("records").select("id,category_id,code,amount,discount,record_date,created_at,created_by,profiles(username,display_name),categories(name)").gte("record_date",from).lte("record_date",to).order("record_date",{ascending:false}).order("created_at",{ascending:false});
+    let q = sb.from("records").select("id,category_id,code,amount,discount,record_date,created_at,created_by,is_void,voided_by,voided_at,profiles(username,display_name),categories(name)").gte("record_date",from).lte("record_date",to).order("record_date",{ascending:false}).order("created_at",{ascending:false});
     if(categoryId) q=q.eq("category_id",categoryId);
     // RLS protects the database; this filter controls the admin UI selection.
     if (profile.role !== "admin") q=q.eq("created_by",currentUser.id);
@@ -84,12 +84,13 @@
     if(error) throw error;
     return data || [];
   }
+  function activeRecords(rows) { return rows.filter(r => !r.is_void); }
   function totals(rows) {
-    return rows.reduce((a,r)=>{a.amount+=Number(r.amount||0);a.discount+=Number(r.discount||0);a.count++;return a;},{amount:0,discount:0,count:0});
+    return activeRecords(rows).reduce((a,r)=>{a.amount+=Number(r.amount||0);a.discount+=Number(r.discount||0);a.count++;return a;},{amount:0,discount:0,count:0});
   }
   async function loadDashboard() {
     try {
-      const rows=await getRecords($("dashFrom").value||today(),$("dashTo").value||today(),null,selectedUserId("dashUser"));
+      const rows=activeRecords(await getRecords($("dashFrom").value||today(),$("dashTo").value||today(),null,selectedUserId("dashUser")));
       const by={}; rows.forEach(r=>{const k=r.category_id;by[k] ||= {name:r.categories?.name||"Unknown",amount:0,discount:0,count:0};by[k].amount+=Number(r.amount||0);by[k].discount+=Number(r.discount||0);by[k].count++;});
       const allCats=categories;
       $("dashboardRows").innerHTML=allCats.map(c=>{const x=by[c.id]||{amount:0,discount:0,count:0};return `<tr><td>${escapeHtml(c.name)}${c.is_active?"":' <span class="pill off">Inactive</span>'}</td><td>${money(x.amount)}</td><td>${money(x.discount)}</td><td>${x.count}</td></tr>`}).join("");
@@ -113,10 +114,38 @@
       const search=$("recordsSearch").value.trim().toLowerCase();
       if(search) rows=rows.filter(r=>(r.code||"").toLowerCase().includes(search));
       recordsCache=rows;
-      $("recordsRows").innerHTML=rows.map(r=>`<tr><td>${localDate(r.record_date)}</td><td>${escapeHtml(r.categories?.name||"")}</td><td>${escapeHtml(r.code||"-")}</td><td>${r.amount==null?"-":money(r.amount)}</td><td>${r.discount==null?"-":money(r.discount)}</td><td>${escapeHtml(r.profiles?.display_name||r.profiles?.username||"")}</td>${profile.role==="admin"?`<td><button class="secondary" data-delete="${r.id}">Delete</button></td>`:""}</tr>`).join("");
-      setText("recordsMessage",`${rows.length} record(s)`);
+      $("recordsRows").innerHTML=rows.map(r=>{
+        const canManage = profile.role === "admin" || r.created_by === currentUser.id;
+        const status = r.is_void ? '<span class="pill off">VOID</span>' : '<span class="pill">Active</span>';
+        const voidButton = canManage ? (r.is_void
+          ? `<button class="secondary" data-undo-void="${r.id}">Undo Void</button>`
+          : `<button class="secondary" data-void="${r.id}">Void</button>`) : "";
+        const deleteButton = profile.role === "admin" ? ` <button class="danger" data-delete="${r.id}">Delete</button>` : "";
+        return `<tr class="${r.is_void ? "void-record" : ""}"><td>${localDate(r.record_date)}</td><td>${escapeHtml(r.categories?.name||"")}</td><td>${escapeHtml(r.code||"-")}</td><td>${r.amount==null?"-":money(r.amount)}</td><td>${r.discount==null?"-":money(r.discount)}</td><td>${escapeHtml(r.profiles?.display_name||r.profiles?.username||"")}</td><td>${status} ${voidButton}${deleteButton}</td></tr>`;
+      }).join("");
+      setText("recordsMessage",`${rows.length} record(s), including void records`);
+      $("recordsRows").querySelectorAll("[data-void]").forEach(b=>b.addEventListener("click",()=>setRecordVoid(b.dataset.void,true)));
+      $("recordsRows").querySelectorAll("[data-undo-void]").forEach(b=>b.addEventListener("click",()=>setRecordVoid(b.dataset.undoVoid,false)));
       $("recordsRows").querySelectorAll("[data-delete]").forEach(b=>b.addEventListener("click",()=>deleteRecord(b.dataset.delete)));
     } catch(e) { setText("recordsMessage","Could not load records: "+err(e)); }
+  }
+
+  async function setRecordVoid(id, isVoid) {
+    const action = isVoid ? "void" : "restore";
+    const promptText = isVoid
+      ? "Void this record? It will remain visible in Records but be excluded from totals and reports."
+      : "Undo Void for this record? It will be included in totals and reports again.";
+    if (!confirm(promptText)) return;
+    try {
+      const { error } = await sb.rpc("set_record_void", { p_record_id: id, p_is_void: isVoid });
+      if (error) throw error;
+      await loadRecords();
+      await loadDashboard();
+      await generateReport();
+      setText("recordsMessage", isVoid ? "Record marked as VOID." : "Void removed; record restored.");
+    } catch (e) {
+      alert(`Could not ${action} record: ` + err(e));
+    }
   }
   async function deleteRecord(id) {
     if(!confirm("Delete this record permanently?")) return;
@@ -126,7 +155,7 @@
   }
   async function generateReport() {
     try {
-      reportCache=await getRecords($("reportFrom").value||today(),$("reportTo").value||today(),$("reportCategory").value||null,selectedUserId("reportUser"));
+      reportCache=activeRecords(await getRecords($("reportFrom").value||today(),$("reportTo").value||today(),$("reportCategory").value||null,selectedUserId("reportUser")));
       const t=totals(reportCache);
       const group={}; reportCache.forEach(r=>{const n=r.categories?.name||"Unknown";group[n] ||= {amount:0,discount:0,count:0};group[n].amount+=Number(r.amount||0);group[n].discount+=Number(r.discount||0);group[n].count++;});
       setText("reportTotals",`Records: ${t.count} · Total Amount: ${money(t.amount)} · Total Discount: ${money(t.discount)}`);
@@ -136,8 +165,8 @@
     } catch(e) { setText("reportTotals","Could not generate report: "+err(e)); }
   }
   function exportCsv() {
-    const rows=reportCache; const head=["Date","Time","Category","Code","Amount (RM)","Discount (RM)","Created By"];
-    const data=[head,...rows.map(r=>[r.record_date,new Date(r.created_at).toLocaleTimeString("en-MY",{hour:"2-digit",minute:"2-digit"}),r.categories?.name||"",r.code||"",r.amount??"",r.discount??"",r.profiles?.display_name||r.profiles?.username||""])];
+    const rows=reportCache; const head=["Date","Time","Category","Code","Amount (RM)","Discount (RM)","Created By","Status"];
+    const data=[head,...rows.map(r=>[r.record_date,new Date(r.created_at).toLocaleTimeString("en-MY",{hour:"2-digit",minute:"2-digit"}),r.categories?.name||"",r.code||"",r.amount??"",r.discount??"",r.profiles?.display_name||r.profiles?.username||"",r.is_void?"VOID":"Active"])];
     const t=totals(rows);
     const group={}; rows.forEach(r=>{const n=r.categories?.name||"Unknown";group[n] ||= {amount:0,discount:0,count:0};group[n].amount+=Number(r.amount||0);group[n].discount+=Number(r.discount||0);group[n].count++;});
     data.push([]);
